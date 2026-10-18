@@ -1,0 +1,260 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeFreeze | Kitchen Inventory</title>
+<style>
+:root{font-family:Arial,sans-serif;color:#17231f;background:#f4f7f5}
+*{box-sizing:border-box}
+body{margin:0}
+header{background:#153c32;color:white;padding:22px 18px}
+header h1{margin:0;font-size:27px}
+header p{margin:7px 0 0;color:#c9ddd4;font-size:14px}
+main{max-width:850px;margin:auto;padding:18px}
+.card{background:white;padding:18px;border-radius:15px;margin-bottom:16px;border:1px solid #e1e9e4}
+h2{font-size:18px;margin:0 0 14px}
+input,select,button{font:inherit;padding:12px;border-radius:9px;width:100%;margin:5px 0;border:1px solid #d4ded8}
+button{background:#176b50;color:white;border:0;font-weight:bold;cursor:pointer}
+button.secondary{background:#e6f1eb;color:#174d39}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1;min-width:0}
+.item{border-top:1px solid #e6ebe7;padding:13px 0}
+.item strong{display:block;margin-bottom:5px}
+.muted{font-size:13px;color:#697970}
+.notice{padding:11px;border-radius:8px;background:#edf4ef;margin:10px 0;font-size:14px;white-space:pre-wrap}
+.hidden{display:none}
+.danger{color:#a33b2d}
+@media(min-width:600px){.fields{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>❄️ WeFreeze</h1>
+  <p>One kitchen. One shared freezer inventory.</p>
+</header>
+<main>
+  <section class="card" id="login">
+    <h2>Chef sign in</h2>
+    <p class="muted">Sign in with your team account.</p>
+    <input id="email" type="email" placeholder="Email address" autocomplete="username">
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="loginBtn" onclick="signIn()">Sign in</button>
+    <div id="loginMsg" class="notice">Enter your account details to continue.</div>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div><h2>Freezer dashboard</h2><div id="teamName" class="muted">Loading team…</div></div>
+        <button class="secondary" style="max-width:110px" onclick="signOut()">Sign out</button>
+      </div>
+      <div id="status" class="notice">Connecting to inventory…</div>
+      <div class="row">
+        <div class="card"><div class="muted">Stock items</div><h2 id="total">—</h2></div>
+        <div class="card"><div class="muted">Expiring soon</div><h2 id="expiring">—</h2></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Add freezer item</h2>
+      <div class="fields">
+        <input id="itemName" placeholder="Item name">
+        <input id="category" placeholder="Category (meat, fish, veg…)">
+        <div class="row">
+          <input id="quantity" type="number" min="0" step="any" placeholder="Quantity">
+          <input id="unit" placeholder="Unit (kg, pcs…)">
+        </div>
+        <input id="expiry" type="date" aria-label="Expiry date">
+        <input id="location" placeholder="Freezer / shelf location">
+      </div>
+      <button onclick="addItem()">Add item</button>
+    </div>
+
+    <div class="card">
+      <h2>Freezer stock</h2>
+      <input id="filter" placeholder="Search inventory…" oninput="renderItems()">
+      <div id="items"></div>
+    </div>
+
+    <div class="card">
+      <h2>Shopping list</h2>
+      <div class="row">
+        <input id="shopName" placeholder="What do we need?">
+        <button style="max-width:100px" onclick="addShopping()">Add</button>
+      </div>
+      <div id="shopping"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* Add your Supabase project URL and publishable key below. */
+const SUPABASE_URL = "PASTE_YOUR_SUPABASE_PROJECT_URL_HERE";
+const SUPABASE_KEY = "PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY_HERE";
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+let db = null, teamId = null, inventory = [], shopping = [];
+
+function message(id, text) {
+  document.getElementById(id).textContent = text;
+}
+function ready() {
+  return SUPABASE_URL.startsWith("https://") &&
+    !SUPABASE_URL.includes("PASTE_") &&
+    !SUPABASE_KEY.includes("PASTE_");
+}
+async function signIn() {
+  if (!ready()) {
+    message("loginMsg", "The Supabase connection details have not been added yet.");
+    return;
+  }
+  if (!db) db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const email = document.getElementById("email").value.trim();
+  const password = document.getElementById("password").value;
+  message("loginMsg", "Signing in…");
+  const {error} = await db.auth.signInWithPassword({email, password});
+  if (error) {
+    message("loginMsg", "Sign-in failed: " + error.message);
+    return;
+  }
+  await loadApp();
+}
+async function signOut() {
+  if (db) await db.auth.signOut();
+  teamId = null;
+  document.getElementById("app").classList.add("hidden");
+  document.getElementById("login").classList.remove("hidden");
+  message("loginMsg", "You have signed out.");
+}
+async function loadApp() {
+  document.getElementById("login").classList.add("hidden");
+  document.getElementById("app").classList.remove("hidden");
+  message("status", "Loading your team…");
+
+  const {data:userData} = await db.auth.getUser();
+  if (!userData.user) return signOut();
+
+  const {data:membership, error:memberError} = await db
+    .from("team_members").select("team_id, role")
+    .eq("user_id", userData.user.id).limit(1).maybeSingle();
+
+  if (memberError || !membership) {
+    message("status", "No team membership found for this account. Ask the owner to check your access.");
+    return;
+  }
+  teamId = membership.team_id;
+
+  const {data:team} = await db.from("teams").select("name")
+    .eq("id", teamId).maybeSingle();
+  message("teamName", team?.name || "Your kitchen team");
+  await refresh();
+}
+async function refresh() {
+  if (!teamId) return;
+  const {data, error} = await db.from("inventory_items")
+    .select("*").eq("team_id", teamId).order("created_at", {ascending:false});
+  if (error) {
+    message("status", "Could not load inventory: " + error.message);
+    return;
+  }
+  inventory = data || [];
+  renderItems();
+  const today = new Date();
+  const soon = new Date();
+  soon.setDate(today.getDate() + 7);
+  const expiring = inventory.filter(x => x.expiry_date &&
+    new Date(x.expiry_date) >= today && new Date(x.expiry_date) <= soon);
+  message("total", inventory.length);
+  message("expiring", expiring.length);
+  message("status", "Inventory loaded. Check expiry dates before using stock.");
+  await loadShopping();
+}
+function renderItems() {
+  const term = document.getElementById("filter").value.toLowerCase();
+  const target = document.getElementById("items");
+  target.innerHTML = "";
+  const found = inventory.filter(x => String(x.name || "").toLowerCase().includes(term));
+  if (!found.length) {
+    target.textContent = "No items found. Add your first freezer item above.";
+    return;
+  }
+  found.forEach(x => {
+    const div = document.createElement("div");
+    div.className = "item";
+    const title = document.createElement("strong");
+    title.textContent = x.name || "Unnamed item";
+    const detail = document.createElement("div");
+    detail.className = "muted";
+    detail.textContent = `${x.quantity ?? "—"} ${x.unit || ""} · ${x.category || "Uncategorised"} · Expires: ${x.expiry_date || "Not set"}${x.location ? " · " + x.location : ""}`;
+    div.append(title, detail);
+    target.appendChild(div);
+  });
+}
+async function addItem() {
+  if (!teamId) return;
+  const name = document.getElementById("itemName").value.trim();
+  if (!name) return alert("Enter an item name first.");
+  const {data:userData} = await db.auth.getUser();
+  const record = {
+    team_id: teamId,
+    name,
+    category: document.getElementById("category").value.trim() || null,
+    quantity: Number(document.getElementById("quantity").value || 0),
+    unit: document.getElementById("unit").value.trim() || null,
+    expiry_date: document.getElementById("expiry").value || null,
+    location: document.getElementById("location").value.trim() || null,
+    updated_by: userData.user.id
+  };
+  const {error} = await db.from("inventory_items").insert(record);
+  if (error) return alert("Could not add item: " + error.message);
+  ["itemName","category","quantity","unit","expiry","location"].forEach(id => document.getElementById(id).value = "");
+  await refresh();
+}
+async function loadShopping() {
+  const {data,error} = await db.from("shopping_list").select("*")
+    .eq("team_id",teamId).order("created_at",{ascending:false});
+  if (error) {
+    message("shopping", "Shopping list unavailable: " + error.message);
+    return;
+  }
+  shopping = data || [];
+  const target = document.getElementById("shopping");
+  target.innerHTML = "";
+  if (!shopping.length) {
+    target.textContent = "Your shopping list is empty.";
+    return;
+  }
+  shopping.forEach(x => {
+    const div = document.createElement("div");
+    div.className = "item";
+    div.textContent = x.item_name || x.name || "Shopping item";
+    target.appendChild(div);
+  });
+}
+async function addShopping() {
+  if (!teamId) return;
+  const name = document.getElementById("shopName").value.trim();
+  if (!name) return alert("Enter an item for the shopping list.");
+  const {data:userData} = await db.auth.getUser();
+  const {error} = await db.from("shopping_list").insert({
+    team_id:teamId, item_name:name, added_by:userData.user.id
+  });
+  if (error) return alert("Could not add shopping item: " + error.message);
+  document.getElementById("shopName").value = "";
+  await loadShopping();
+}
+window.addEventListener("load", async () => {
+  if (!ready()) {
+    message("loginMsg", "Next, add your Supabase URL and publishable key to connect WeFreeze.");
+    return;
+  }
+  db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const {data} = await db.auth.getSession();
+  if (data.session) await loadApp();
+});
+</script>
+</body>
+</html>
